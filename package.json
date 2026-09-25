@@ -2,11 +2,7 @@
   "name": "acr-cleanup",
   "version": "1.0.0",
   "description": "Apaga imagens antigas do Azure Container Registry, mantendo a mais recente de cada repositório",
-  "main": "src/acr-cleanup.js",
-  "scripts": {
-    "start": "node --env-file=.env src/index.js",
-    "once": "node --env-file=.env src/index.js --once"
-  },
+  "scripts": {},
   "repository": {
     "type": "git",
     "url": "git+https://github.com/luizprimati/azure-repositories.git"
@@ -18,8 +14,7 @@
   "homepage": "https://github.com/luizprimati/azure-repositories#readme",
   "dependencies": {
     "@azure/container-registry": "^1.1.2",
-    "@azure/identity": "^4.13.3",
-    "node-cron": "^4.6.0"
+    "@azure/identity": "^4.13.3"
   },
   "engines": {
     "node": ">=20.6"

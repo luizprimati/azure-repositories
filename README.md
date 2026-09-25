@@ -1,25 +1,36 @@
-# Limpeza automática do Azure Container Registry (Node.js)
+# Limpeza automática do Azure Container Registry
 
-Todo dia passa por **todos os repositórios** do ACR (`genericos/sienge`, `chat/api`, ...) e
-apaga as imagens antigas, mantendo **só a mais recente** de cada um.
+Controller no padrão da plataforma (`@Controller` + `node-cron` + lock no Postgres) que,
+todo dia às 03:00, varre todos os repositórios do ACR e apaga as imagens antigas,
+mantendo só a mais recente de cada um.
 
-Exemplo: `genericos/sienge` com `20251217.1` (17/12/2025) e `20251003.2` (03/10/2025) →
-fica `20251217.1`, apaga `20251003.2`.
+Arquivo: `src/controllers/azure/acrLimpeza.ts` — copie para a pasta de controllers da
+plataforma (os imports `../../lib/...` seguem o mesmo padrão do `EmailHelpdeskController`).
 
-## Instalação
+## Dependências
 
 ```bash
-npm install
-cp .env.example .env   # preencha com o mesmo AZURE_* do app de IP
-npm run once           # roda uma vez (começa em dry-run: só mostra o que apagaria)
-npm start              # fica rodando e executa todo dia no horário de ACR_CRON
+npm install @azure/identity @azure/container-registry
 ```
 
-Depois de conferir o log do dry-run, mude `ACR_DRY_RUN=false`.
+## .env
 
-## Permissão na Azure (uma vez só)
+Usa o mesmo App Registration do NSG (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+`AZURE_CLIENT_SECRET`). Variáveis novas, todas opcionais:
 
-O service principal do `.env` precisa poder listar e apagar imagens no registry:
+```env
+ACR_NAME=eveproduseastregistry
+ACR_KEEP=1            # quantas imagens manter por repositório
+ACR_DRY_RUN=1         # 1 = cron só loga o que apagaria. Tire depois de conferir.
+ACR_LIMPEZA_ATIVO=1   # 0 desativa o cron
+ACR_CRON=0 3 * * *    # horário de Brasília
+ACR_REPO_FILTER=      # regex opcional, ex: ^genericos/
+```
+
+## Permissão na Azure (uma vez)
+
+Registry → *Access control (IAM)* → *Add role assignment* → roles **AcrPull** e
+**AcrDelete** para o App Registration do `AZURE_CLIENT_ID`. Ou:
 
 ```bash
 ACR_ID=$(az acr show --name eveproduseastregistry --query id -o tsv)
@@ -27,36 +38,14 @@ az role assignment create --assignee <AZURE_CLIENT_ID> --role AcrPull   --scope 
 az role assignment create --assignee <AZURE_CLIENT_ID> --role AcrDelete --scope $ACR_ID
 ```
 
-(Pelo portal: registry → *Access control (IAM)* → *Add role assignment*.)
+## Endpoints
 
-## Usar dentro da sua plataforma
-
-Se a plataforma já tem um agendador, importe a função em vez de usar `src/index.js`:
-
-```js
-const { cleanupRegistry, optionsFromEnv } = require("./src/acr-cleanup");
-
-const resumo = await cleanupRegistry(optionsFromEnv());
-// { repositories, deleted, bytes, errors }
-```
-
-## Variáveis
-
-| Variável | Padrão | O que faz |
-|---|---|---|
-| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | – | Service principal (o mesmo que você já usa) |
-| `ACR_NAME` | – | Nome do registry (`eveproduseastregistry`) |
-| `ACR_KEEP` | `1` | Quantas imagens manter por repositório |
-| `ACR_DRY_RUN` | `true` | `true` só lista; `false` apaga de verdade |
-| `ACR_REPO_FILTER` | todos | Regex para limitar repositórios, ex. `^genericos/` |
-| `ACR_CRON` | `0 3 * * *` | Horário da execução diária |
-| `ACR_TIMEZONE` | `America/Sao_Paulo` | Fuso do `ACR_CRON` |
+- `GET  /acrLimpeza/simular` — lista o que seria apagado, sem apagar.
+- `POST /acrLimpeza/executar` — dispara a limpeza agora (roda em segundo plano, resultado no log).
 
 ## Regras
 
-- Uma imagem = um manifest (digest). Se o digest tiver várias tags, ficam todas juntas.
-- Imagens com tag têm prioridade: um build sem tag nunca ocupa a vaga da última versão.
-- Imagens bloqueadas (`az acr repository update --image repo:tag --delete-enabled false`)
-  nunca são apagadas.
-- O espaço “liberado” do log é estimado: camadas compartilhadas com a imagem mantida
-  continuam ocupando espaço. A Azure leva algumas horas para refletir a redução.
+- Uma imagem = um manifest (digest); tags do mesmo digest saem juntas.
+- Imagens com tag têm prioridade sobre as sem tag na hora de escolher a que fica.
+- Imagens com exclusão bloqueada no portal nunca são apagadas.
+- Lock `pg_advisory_lock(1007)` no banco `help_desk` evita execução paralela entre instâncias.
