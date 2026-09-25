@@ -1,0 +1,39 @@
+name: ACR cleanup
+
+on:
+  schedule:
+    # Todo dia às 06:00 UTC (03:00 em Brasília)
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Só listar o que seria apagado (não apaga nada)"
+        type: boolean
+        default: true
+      keep:
+        description: "Quantas imagens manter por repositório"
+        default: "1"
+
+permissions:
+  id-token: write   # login na Azure via OIDC (sem senha guardada)
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Limpar imagens antigas
+        env:
+          ACR_NAME: ${{ vars.ACR_NAME || 'eveproduseastregistry' }}
+          KEEP: ${{ inputs.keep || '1' }}
+          # Execução agendada apaga de verdade; execução manual respeita o checkbox.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: ./scripts/acr-cleanup.sh
