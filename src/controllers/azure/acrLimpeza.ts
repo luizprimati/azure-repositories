@@ -3,7 +3,7 @@ import express = require('express')
 import { Controller, Post, Get } from '../../lib/request.decorator'
 const cron = require('node-cron');
 import { ClientSecretCredential } from '@azure/identity'
-import { ContainerRegistryClient, KnownContainerRegistryAudience, ArtifactManifestProperties } from '@azure/container-registry'
+import { ContainerRegistryClient, ContainerRegistryContentClient, KnownContainerRegistryAudience, ArtifactManifestProperties } from '@azure/container-registry'
 
 import * as dotenv from 'dotenv'
 dotenv.config()
@@ -18,19 +18,27 @@ const ACR_KEEP    = Number(process.env.ACR_KEEP || 1);            // quantas ima
 const ACR_FILTRO  = new RegExp(process.env.ACR_REPO_FILTER || '.*'); // ex: ^genericos/
 const ACR_LOCK_ID = 1007;
 
+const ACR_ENDPOINT = `https://${ACR_NAME}.azurecr.io`;
+const ACR_OPCOES   = { audience: KnownContainerRegistryAudience.AzureResourceManagerPublicCloud };
+
+let acrCredential: ClientSecretCredential | null = null;
 let acrClient: ContainerRegistryClient | null = null;
 
-function getAcrClient(): ContainerRegistryClient {
-    if (!acrClient) {
-        const credential = new ClientSecretCredential(
+function getAcrCredential(): ClientSecretCredential {
+    if (!acrCredential) {
+        // O SDK renova o token sozinho, não precisa de cache manual como no Graph
+        acrCredential = new ClientSecretCredential(
             process.env.AZURE_TENANT_ID!,
             process.env.AZURE_CLIENT_ID!,
             process.env.AZURE_CLIENT_SECRET!,
         );
-        // O SDK renova o token sozinho, não precisa de cache manual como no Graph
-        acrClient = new ContainerRegistryClient(`https://${ACR_NAME}.azurecr.io`, credential, {
-            audience: KnownContainerRegistryAudience.AzureResourceManagerPublicCloud,
-        });
+    }
+    return acrCredential;
+}
+
+function getAcrClient(): ContainerRegistryClient {
+    if (!acrClient) {
+        acrClient = new ContainerRegistryClient(ACR_ENDPOINT, getAcrCredential(), ACR_OPCOES);
     }
     return acrClient;
 }
@@ -132,7 +140,19 @@ export class AcrLimpezaController {
                 manifests.sort((a, b) => semTag(a) - semTag(b));
 
                 const mantidas = manifests.slice(0, ACR_KEEP);
-                const apagar = manifests.slice(ACR_KEEP).filter(m => m.canDelete !== false);
+                const protegidas = manifests.filter(m => m.canDelete === false);
+
+                // Imagens multi-arquitetura (buildx) são um "índice" com tag que aponta para
+                // manifests SEM tag. Apagar esses filhos quebra a imagem mantida, então
+                // eles ficam protegidos. Se não der para ler o índice, não apaga nenhuma
+                // imagem sem tag deste repositório (prefere sobrar do que quebrar).
+                const filhos = await this.digestsReferenciados(nomeRepo, [...mantidas, ...protegidas]);
+
+                const apagar = manifests.slice(ACR_KEEP).filter(m =>
+                    m.canDelete !== false &&
+                    !(filhos === null && !m.tags?.length) &&
+                    !(filhos !== null && filhos.has(m.digest))
+                );
 
                 if (apagar.length === 0) continue;
 
@@ -164,6 +184,33 @@ export class AcrLimpezaController {
         console.log(`${dryRun ? '[simulação] ' : ''}ACR: ${totalApagadas} imagem(ns) ${dryRun ? 'seriam apagadas' : 'apagadas'}, ~${liberado} liberados, ${totalErros} erro(s).`);
 
         return { ok: true, dryRun, totalApagadas, liberado, totalErros, repositorios };
+    }
+
+    //*******************************************************************************
+    //* digestsReferenciados — digests dos manifests filhos das imagens informadas
+    //* (plataformas e atestados de um índice multi-arquitetura). null = falhou.
+    //*******************************************************************************
+    private async digestsReferenciados(nomeRepo: string, imagens: ArtifactManifestProperties[]): Promise<Set<string> | null> {
+        const digests = new Set<string>();
+        try {
+            const conteudo = new ContainerRegistryContentClient(ACR_ENDPOINT, nomeRepo, getAcrCredential(), ACR_OPCOES);
+            for (const img of imagens) {
+                for (const rel of img.relatedArtifacts || []) {
+                    if (rel.digest) digests.add(rel.digest);
+                }
+                const { manifest } = await conteudo.getManifest(img.digest);
+                const lista = (manifest as any).manifests;
+                if (Array.isArray(lista)) {
+                    for (const filho of lista) {
+                        if (filho?.digest) digests.add(filho.digest);
+                    }
+                }
+            }
+            return digests;
+        } catch (err) {
+            console.error(`[${nomeRepo}] não foi possível ler o índice da imagem mantida, imagens sem tag serão preservadas:`, err);
+            return null;
+        }
     }
 
     private nomeImagem(m: ArtifactManifestProperties): string {
